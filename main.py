@@ -8,20 +8,30 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 print("start")
 
 excel_path = os.path.join(BASE_DIR, "infosci_filled_by_years.xlsx")
-print("reading excel...")
+if not os.path.exists(excel_path):
+    excel_path = os.path.join(BASE_DIR, "infosci.xlsx")
+
+geojson_path = os.path.join(BASE_DIR, "almaty.geo.json")
+output_path = os.path.join(BASE_DIR, "final_map.html")
+
+print("reading excel:", excel_path)
 
 needed_names = {
     "datetime", "date", "time", "timestamp", "measured_at", "measuredat",
     "name", "station_name",
     "pm25", "pm_25", "pm2.5", "pm2_5",
+    "pm10", "pm_10", "pm1.0", "pm1_0",
+    "no2", "no_2", "nitrogen_dioxide",
     "lat", "latitude",
     "lon", "lng", "longitude",
     "district",
-    "district_ru", "district_rus", "districtru"
+    "district_ru", "district_rus", "districtru",
 }
+
 
 def clean_col(c):
     return str(c).strip().lower()
+
 
 def use_column(c):
     c = clean_col(c)
@@ -31,10 +41,29 @@ def use_column(c):
         return True
     if "pm25" in c or "pm2.5" in c:
         return True
+    if "pm10" in c or "pm1.0" in c:
+        return True
+    if "no2" in c or "nitrogen" in c:
+        return True
     return False
 
-excel_file = pd.ExcelFile(excel_path, engine="openpyxl")
 
+def find_col(col_map, keys):
+    for key in keys:
+        if key in col_map:
+            return col_map[key]
+    return None
+
+
+def find_fuzzy(columns, checks):
+    for c in columns:
+        low = clean_col(c)
+        if any(check in low for check in checks):
+            return c
+    return None
+
+
+excel_file = pd.ExcelFile(excel_path, engine="openpyxl")
 frames = []
 
 for sheet_name in excel_file.sheet_names:
@@ -45,16 +74,24 @@ for sheet_name in excel_file.sheet_names:
         sheet_name=sheet_name,
         engine="openpyxl",
         usecols=use_column,
-        dtype=str
+        dtype=str,
     )
+
+    if sheet_df.empty:
+        continue
 
     sheet_df.columns = [str(c).strip() for c in sheet_df.columns]
 
-    if "datetime" in sheet_df.columns:
-        sheet_df = sheet_df[sheet_df["datetime"].astype(str).str.lower() != "datetime"]
+    for c in sheet_df.columns:
+        if clean_col(c) == "datetime":
+            sheet_df = sheet_df[sheet_df[c].astype(str).str.lower() != "datetime"]
+            break
 
     sheet_df["excel_sheet"] = str(sheet_name)
     frames.append(sheet_df)
+
+if not frames:
+    raise ValueError("Не удалось найти нужные данные в Excel")
 
 stations_df = pd.concat(frames, ignore_index=True)
 
@@ -65,42 +102,46 @@ stations_df.columns = [str(c).strip() for c in stations_df.columns]
 
 col_map = {}
 for c in stations_df.columns:
-    col_map[str(c).strip().lower()] = c
+    col_map[clean_col(c)] = c
 
-def find_col(keys):
-    for key in keys:
-        if key in col_map:
-            return col_map[key]
-    return None
+name_col = find_col(col_map, ["name", "station_name"])
+pm25_col = find_col(col_map, ["pm25", "pm_25", "pm2.5", "pm2_5"])
+pm10_col = find_col(col_map, ["pm10", "pm_10", "pm1.0", "pm1_0"])
+no2_col = find_col(col_map, ["no2", "no_2", "nitrogen_dioxide"])
+lat_col = find_col(col_map, ["lat", "latitude"])
+lon_col = find_col(col_map, ["lon", "lng", "longitude"])
+district_col = find_col(col_map, ["district"])
+district_ru_col = find_col(col_map, ["district_ru", "district_rus", "districtru"])
+date_col = find_col(col_map, ["date", "datetime", "time", "timestamp", "measured_at", "measuredat"])
 
-name_col = find_col(["name", "station_name"])
-pm25_col = find_col(["pm25", "pm_25", "pm2.5", "pm2_5"])
-lat_col = find_col(["lat", "latitude"])
-lon_col = find_col(["lon", "lng", "longitude"])
-district_col = find_col(["district"])
-district_ru_col = find_col(["district_ru", "district_rus", "districtru"])
-date_col = find_col(["date", "datetime", "time", "timestamp", "measured_at", "measuredat"])
+if pm25_col is None:
+    pm25_col = find_fuzzy(stations_df.columns, ["pm25", "pm2.5"])
+
+if pm10_col is None:
+    pm10_col = find_fuzzy(stations_df.columns, ["pm10", "pm1.0"])
+
+if no2_col is None:
+    no2_col = find_fuzzy(stations_df.columns, ["no2", "nitrogen"])
 
 if district_ru_col is None:
     for c in stations_df.columns:
-        low = str(c).strip().lower()
+        low = clean_col(c)
         if "district" in low and "ru" in low:
             district_ru_col = c
             break
 
-if pm25_col is None:
-    for c in stations_df.columns:
-        low = str(c).strip().lower()
-        if "pm25" in low or "pm2.5" in low:
-            pm25_col = c
-            break
+required_cols = [name_col, lat_col, lon_col, district_col, district_ru_col, date_col]
 
-need_cols = [name_col, pm25_col, lat_col, lon_col, district_col, district_ru_col, date_col]
+if pm25_col is None and pm10_col is None and no2_col is None:
+    print("columns found:", stations_df.columns.tolist())
+    raise ValueError("Не найдены колонки загрязнения: pm25, pm10 или no2")
 
-if any(col is None for col in need_cols):
+if any(col is None for col in required_cols):
     print("columns found:", stations_df.columns.tolist())
     print("name_col =", name_col)
     print("pm25_col =", pm25_col)
+    print("pm10_col =", pm10_col)
+    print("no2_col =", no2_col)
     print("lat_col =", lat_col)
     print("lon_col =", lon_col)
     print("district_col =", district_col)
@@ -108,28 +149,44 @@ if any(col is None for col in need_cols):
     print("date_col =", date_col)
     raise ValueError("Не удалось определить нужные колонки в Excel")
 
-stations_df = stations_df[
-    [name_col, pm25_col, lat_col, lon_col, district_col, district_ru_col, date_col]
-].copy()
+selected_cols = [name_col, lat_col, lon_col, district_col, district_ru_col, date_col]
+rename_map = {
+    name_col: "station_name",
+    lat_col: "latitude",
+    lon_col: "longitude",
+    district_col: "district",
+    district_ru_col: "district_ru",
+    date_col: "date",
+}
 
-stations_df.columns = [
-    "station_name",
-    "pm25",
-    "latitude",
-    "longitude",
-    "district",
-    "district_ru",
-    "date"
-]
+if pm25_col is not None:
+    selected_cols.append(pm25_col)
+    rename_map[pm25_col] = "pm25"
+
+if pm10_col is not None:
+    selected_cols.append(pm10_col)
+    rename_map[pm10_col] = "pm10"
+
+if no2_col is not None:
+    selected_cols.append(no2_col)
+    rename_map[no2_col] = "no2"
+
+stations_df = stations_df[selected_cols].copy()
+stations_df = stations_df.rename(columns=rename_map)
+
+for pollutant in ["pm25", "pm10", "no2"]:
+    if pollutant not in stations_df.columns:
+        stations_df[pollutant] = None
 
 stations_df["type"] = "Air Station"
 
-for col in ["latitude", "longitude", "pm25"]:
+for col in ["latitude", "longitude", "pm25", "pm10", "no2"]:
     stations_df[col] = (
         stations_df[col]
         .astype(str)
         .str.replace(",", ".", regex=False)
         .str.strip()
+        .replace({"None": None, "nan": None, "": None})
     )
     stations_df[col] = pd.to_numeric(stations_df[col], errors="coerce")
 
@@ -139,7 +196,7 @@ for col in ["district_ru", "district", "station_name", "date"]:
 stations_df["date_parsed"] = pd.to_datetime(
     stations_df["date"],
     format="%d.%m.%Y %H:%M",
-    errors="coerce"
+    errors="coerce",
 )
 
 mask_bad = stations_df["date_parsed"].isna()
@@ -148,10 +205,25 @@ if mask_bad.sum() > 0:
     print("dates not parsed in first format:", int(mask_bad.sum()))
     stations_df.loc[mask_bad, "date_parsed"] = pd.to_datetime(
         stations_df.loc[mask_bad, "date"],
-        errors="coerce"
+        errors="coerce",
+        dayfirst=True,
     )
 
 stations_df["year"] = stations_df["date_parsed"].dt.year
+stations_df["month"] = stations_df["date_parsed"].dt.month
+
+
+def get_season(month):
+    if month in [12, 1, 2]:
+        return "Winter"
+    if month in [3, 4, 5]:
+        return "Spring"
+    if month in [6, 7, 8]:
+        return "Summer"
+    return "Autumn"
+
+
+stations_df["season"] = stations_df["month"].apply(get_season)
 
 stations_df = stations_df.dropna(
     subset=["latitude", "longitude", "district_ru", "date_parsed", "year"]
@@ -161,8 +233,6 @@ stations_df["year"] = stations_df["year"].astype(int)
 
 print("rows after cleaning:", len(stations_df))
 print("years found:", sorted(stations_df["year"].unique().tolist()))
-
-geojson_path = os.path.join(BASE_DIR, "almaty.geo.json")
 
 with open(geojson_path, "r", encoding="utf-8") as f:
     geojson_data = json.load(f)
@@ -178,55 +248,78 @@ for feature in geojson_data.get("features", []):
 
 years = sorted(stations_df["year"].unique().tolist())
 years_str = [str(y) for y in years]
+seasons = ["Winter", "Spring", "Summer", "Autumn"]
+pollutants = ["pm25", "pm10", "no2"]
 
 district_info = {}
 
-district_group = stations_df.groupby(["year", "district_ru"], sort=False)
-
-for (year, district_ru), group in district_group:
+for (year, season, district_ru), group in stations_df.groupby(["year", "season", "district_ru"], sort=False):
     year = str(year)
 
     if year not in district_info:
         district_info[year] = {}
 
-    district_info[year][district_ru] = {
+    if season not in district_info[year]:
+        district_info[year][season] = {}
+
+    pollution = {}
+    for pollutant in pollutants:
+        pollution[pollutant] = (
+            round(group[pollutant].mean(), 2)
+            if group[pollutant].notna().any()
+            else None
+        )
+
+    district_info[year][season][district_ru] = {
         "district_ru": district_ru,
         "district_en": str(group["district"].iloc[0]),
-        "pollution": round(group["pm25"].mean(), 2) if group["pm25"].notna().any() else None,
-        "count": int(len(group))
+        "pollution": pollution,
+        "count": int(len(group)),
     }
 
 stations_df = stations_df.sort_values("date_parsed")
 stations_df["year"] = stations_df["year"].astype(str)
 stations_df["date_text"] = stations_df["date_parsed"].dt.strftime("%d.%m.%Y %H:%M")
-stations_df["pm25_text"] = stations_df["pm25"].round(2)
 
 station_groups = {}
 
-group_cols = ["year", "district_ru", "station_name"]
+group_cols = ["year", "season", "district_ru", "station_name"]
 
-for (year, district_ru, station_name), group in stations_df.groupby(group_cols, sort=False):
+for (year, season, district_ru, station_name), group in stations_df.groupby(group_cols, sort=False):
+    group = group.sort_values("date_parsed")
     first_row = group.iloc[0]
     last_row = group.iloc[-1]
 
-    measurements = group[["date_text", "pm25_text"]].rename(columns={
-        "date_text": "date",
-        "pm25_text": "pm25"
-    }).to_dict("records")
+    measurements = []
 
-    for m in measurements:
-        if pd.isna(m["pm25"]):
-            m["pm25"] = None
-        else:
-            m["pm25"] = round(float(m["pm25"]), 2)
+    for _, row in group.iterrows():
+        item = {"date": row["date_text"]}
+        for pollutant in pollutants:
+            item[pollutant] = (
+                round(float(row[pollutant]), 2)
+                if pd.notna(row[pollutant])
+                else None
+            )
+        measurements.append(item)
+
+    latest = {}
+    for pollutant in pollutants:
+        latest[pollutant] = (
+            round(float(last_row[pollutant]), 2)
+            if pd.notna(last_row[pollutant])
+            else None
+        )
 
     if year not in station_groups:
         station_groups[year] = {}
 
-    if district_ru not in station_groups[year]:
-        station_groups[year][district_ru] = []
+    if season not in station_groups[year]:
+        station_groups[year][season] = {}
 
-    station_groups[year][district_ru].append({
+    if district_ru not in station_groups[year][season]:
+        station_groups[year][season][district_ru] = []
+
+    station_groups[year][season][district_ru].append({
         "station_name": str(station_name),
         "latitude": float(first_row["latitude"]),
         "longitude": float(first_row["longitude"]),
@@ -234,14 +327,18 @@ for (year, district_ru, station_name), group in stations_df.groupby(group_cols, 
         "district_ru": str(district_ru),
         "district_en": str(first_row["district"]),
         "year": str(year),
-        "pm25_latest": round(float(last_row["pm25"]), 2) if pd.notna(last_row["pm25"]) else 0,
+        "season": str(season),
+        "latest": latest,
         "latest_date": str(last_row["date_text"]),
-        "measurements": measurements
+        "measurements": measurements,
     })
 
 for year in station_groups:
-    for district_ru in station_groups[year]:
-        station_groups[year][district_ru].sort(key=lambda x: x["station_name"].lower())
+    for season in station_groups[year]:
+        for district_ru in station_groups[year][season]:
+            station_groups[year][season][district_ru].sort(
+                key=lambda x: x["station_name"].lower()
+            )
 
 print("stations with histories prepared")
 print("data prepared")
@@ -251,6 +348,7 @@ geojson_js = json.dumps(geojson_data, ensure_ascii=False)
 district_info_js = json.dumps(district_info, ensure_ascii=False)
 station_groups_js = json.dumps(station_groups, ensure_ascii=False)
 years_js = json.dumps(years_str, ensure_ascii=False)
+seasons_js = json.dumps(seasons, ensure_ascii=False)
 
 build_time = datetime.now().strftime("%H:%M:%S")
 
@@ -309,7 +407,7 @@ html = f"""<!DOCTYPE html>
         .card {{
             background: #ffffff;
             border: 1px solid #e5e7eb;
-            border-radius: 16px;
+            border-radius: 8px;
             padding: 16px;
             margin-bottom: 16px;
         }}
@@ -390,7 +488,7 @@ html = f"""<!DOCTYPE html>
             background: #0f172a;
             color: white;
             border: none;
-            border-radius: 10px;
+            border-radius: 8px;
             padding: 10px 14px;
             font-size: 14px;
             cursor: pointer;
@@ -411,7 +509,7 @@ html = f"""<!DOCTYPE html>
         .select-box {{
             width: 100%;
             padding: 10px;
-            border-radius: 10px;
+            border-radius: 8px;
             border: 1px solid #d1d5db;
             font-size: 14px;
             background: white;
@@ -427,6 +525,23 @@ html = f"""<!DOCTYPE html>
             color: #6b7280;
             line-height: 1.5;
             margin-top: 6px;
+        }}
+
+        @media (max-width: 800px) {{
+            #app {{
+                flex-direction: column;
+            }}
+
+            #map {{
+                min-height: 58vh;
+            }}
+
+            #sidebar {{
+                width: 100%;
+                height: 42vh;
+                border-left: none;
+                border-top: 1px solid #e5e7eb;
+            }}
         }}
     </style>
 </head>
@@ -456,6 +571,16 @@ html = f"""<!DOCTYPE html>
             <div class="stations-title">Год</div>
             <select id="year-select" class="select-box"></select>
 
+            <div class="stations-title">Сезон</div>
+            <select id="season-select" class="select-box"></select>
+
+            <div class="stations-title">Показатель</div>
+            <select id="pollutant-select" class="select-box">
+                <option value="pm25">PM2.5</option>
+                <option value="pm10">PM10</option>
+                <option value="no2">NO2</option>
+            </select>
+
             <div class="stations-title">Слой карты</div>
             <select id="layer-select" class="select-box">
                 <option value="stations">Stations only</option>
@@ -476,12 +601,13 @@ html = f"""<!DOCTYPE html>
             <button class="top-btn" onclick="resetView()">Сбросить выбор</button>
         </div>
 
-        <div class="card" id="pm25-legend-card">
-            <div class="stations-title">Легенда PM2.5</div>
+        <div class="card" id="pollution-legend-card">
+            <div class="stations-title">Легенда загрязнения</div>
             <div class="legend">
-                <div class="legend-row"><span class="dot" style="background:green;"></span>PM2.5 меньше 50</div>
-                <div class="legend-row"><span class="dot" style="background:orange;"></span>PM2.5 от 50 до 100</div>
-                <div class="legend-row"><span class="dot" style="background:red;"></span>PM2.5 больше 100</div>
+                <div class="legend-row"><span class="dot" style="background:green;"></span>Меньше 50</div>
+                <div class="legend-row"><span class="dot" style="background:orange;"></span>От 50 до 100</div>
+                <div class="legend-row"><span class="dot" style="background:red;"></span>Больше 100</div>
+                <div class="legend-row"><span class="dot" style="background:#9ca3af;"></span>Нет данных</div>
                 <div class="legend-row"><span class="dot" style="background:#2563eb;"></span>Выбранный район</div>
             </div>
         </div>
@@ -515,74 +641,28 @@ const geojsonData = {geojson_js};
 const districtInfo = {district_info_js};
 const stationGroups = {station_groups_js};
 const years = {years_js};
+const seasons = {seasons_js};
 
-const cityConfig = {{
-    almaty: {{
-        name: "Алматы, Казахстан",
-        center: [43.2389, 76.8897],
-        zoom: 11,
-        hasStations: true
-    }},
-    astana: {{
-        name: "Астана, Казахстан",
-        center: [51.1694, 71.4491],
-        zoom: 11,
-        hasStations: false
-    }},
-    tashkent: {{
-        name: "Ташкент, Узбекистан",
-        center: [41.2995, 69.2401],
-        zoom: 11,
-        hasStations: false
-    }},
-    samarkand: {{
-        name: "Самарканд, Узбекистан",
-        center: [39.6542, 66.9597],
-        zoom: 11,
-        hasStations: false
-    }},
-    nukus: {{
-        name: "Нукус, Узбекистан",
-        center: [42.4531, 59.6103],
-        zoom: 11,
-        hasStations: false
-    }},
-    bishkek: {{
-        name: "Бишкек, Кыргызстан",
-        center: [42.8746, 74.5698],
-        zoom: 11,
-        hasStations: false
-    }},
-    talas: {{
-        name: "Талас, Кыргызстан",
-        center: [42.5228, 72.2427],
-        zoom: 12,
-        hasStations: false
-    }},
-    dushanbe: {{
-        name: "Душанбе, Таджикистан",
-        center: [38.5598, 68.7870],
-        zoom: 11,
-        hasStations: false
-    }},
-    ashgabat: {{
-        name: "Ашхабад, Туркменистан",
-        center: [37.9601, 58.3261],
-        zoom: 11,
-        hasStations: false
-    }},
-    turkmenbashi: {{
-        name: "Туркменбаши, Туркменистан",
-        center: [40.0222, 52.9552],
-        zoom: 12,
-        hasStations: false
-    }}
+const pollutantLabels = {{
+    pm25: "PM2.5",
+    pm10: "PM10",
+    no2: "NO2"
 }};
 
-const map = L.map('map', {{
-    preferCanvas: false,
-    zoomControl: true
-}}).setView([43.2389, 76.8897], 11);
+const cityConfig = {{
+    almaty: {{ name: "Алматы, Казахстан", center: [43.2389, 76.8897], zoom: 11, hasStations: true }},
+    astana: {{ name: "Астана, Казахстан", center: [51.1694, 71.4491], zoom: 11, hasStations: false }},
+    tashkent: {{ name: "Ташкент, Узбекистан", center: [41.2995, 69.2401], zoom: 11, hasStations: false }},
+    samarkand: {{ name: "Самарканд, Узбекистан", center: [39.6542, 66.9597], zoom: 11, hasStations: false }},
+    nukus: {{ name: "Нукус, Узбекистан", center: [42.4531, 59.6103], zoom: 11, hasStations: false }},
+    bishkek: {{ name: "Бишкек, Кыргызстан", center: [42.8746, 74.5698], zoom: 11, hasStations: false }},
+    talas: {{ name: "Талас, Кыргызстан", center: [42.5228, 72.2427], zoom: 12, hasStations: false }},
+    dushanbe: {{ name: "Душанбе, Таджикистан", center: [38.5598, 68.7870], zoom: 11, hasStations: false }},
+    ashgabat: {{ name: "Ашхабад, Туркменистан", center: [37.9601, 58.3261], zoom: 11, hasStations: false }},
+    turkmenbashi: {{ name: "Туркменбаши, Туркменистан", center: [40.0222, 52.9552], zoom: 12, hasStations: false }}
+}};
+
+const map = L.map('map', {{ preferCanvas: false, zoomControl: true }}).setView([43.2389, 76.8897], 11);
 
 L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
     maxZoom: 19,
@@ -604,14 +684,19 @@ let selectedLayer = null;
 let allDistrictLayers = [];
 let geojsonLayer = null;
 let selectedYear = years.length > 0 ? years[years.length - 1] : "2024";
+let currentSeason = seasons.includes("Summer") ? "Summer" : seasons[0];
+let currentPollutant = "pm25";
 let currentMode = "stations";
 let landCoverLayer = null;
+let selectedDistrictRu = null;
 
 const citySelect = document.getElementById('city-select');
 const yearSelect = document.getElementById('year-select');
+const seasonSelect = document.getElementById('season-select');
+const pollutantSelect = document.getElementById('pollutant-select');
 const layerSelect = document.getElementById('layer-select');
 const landcoverLegendCard = document.getElementById('landcover-legend-card');
-const pm25LegendCard = document.getElementById('pm25-legend-card');
+const pollutionLegendCard = document.getElementById('pollution-legend-card');
 
 if (years.length === 0) {{
     const option = document.createElement('option');
@@ -627,7 +712,16 @@ if (years.length === 0) {{
     }}
 }}
 
+for (let i = 0; i < seasons.length; i++) {{
+    const option = document.createElement('option');
+    option.value = seasons[i];
+    option.textContent = seasons[i];
+    seasonSelect.appendChild(option);
+}}
+
 yearSelect.value = selectedYear;
+seasonSelect.value = currentSeason;
+pollutantSelect.value = currentPollutant;
 
 citySelect.addEventListener('change', function() {{
     currentCity = this.value;
@@ -638,6 +732,21 @@ yearSelect.addEventListener('change', function() {{
     selectedYear = this.value;
     updateLandCover();
     resetView();
+}});
+
+seasonSelect.addEventListener('change', function() {{
+    currentSeason = this.value;
+    resetView();
+}});
+
+pollutantSelect.addEventListener('change', function() {{
+    currentPollutant = this.value;
+    if (selectedDistrictRu) {{
+        updatePanel(selectedDistrictRu);
+        showMarkersForDistrict(selectedDistrictRu);
+    }} else {{
+        resetView();
+    }}
 }});
 
 layerSelect.addEventListener('change', function() {{
@@ -651,17 +760,13 @@ function updateLandCover() {{
         landCoverLayer = null;
     }}
 
-    if (currentMode === "arcgis") {{
+    if (currentMode === "arcgis" && typeof L.esri !== "undefined") {{
         landCoverLayer = L.esri.imageMapLayer({{
             url: "https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer",
             pane: "landCoverPane",
             opacity: 0.55,
-            mosaicRule: {{
-                where: "Year=" + selectedYear
-            }},
-            renderingRule: {{
-                rasterFunction: "Cartographic Renderer for Visualization and Analysis"
-            }}
+            mosaicRule: {{ where: "Year=" + selectedYear }},
+            renderingRule: {{ rasterFunction: "Cartographic Renderer for Visualization and Analysis" }}
         }}).addTo(map);
 
         landcoverLegendCard.style.display = "block";
@@ -671,43 +776,40 @@ function updateLandCover() {{
 }}
 
 function getDefaultStyle() {{
-    return {{
-        pane: 'districtPane',
-        color: '#111827',
-        weight: 2,
-        opacity: 0.9,
-        fillOpacity: 0
-    }};
+    return {{ pane: 'districtPane', color: '#111827', weight: 2, opacity: 0.9, fillOpacity: 0 }};
 }}
 
 function getHoverStyle() {{
-    return {{
-        pane: 'districtPane',
-        color: '#374151',
-        weight: 3,
-        opacity: 1,
-        fillOpacity: 0
-    }};
+    return {{ pane: 'districtPane', color: '#374151', weight: 3, opacity: 1, fillOpacity: 0 }};
 }}
 
 function getHighlightStyle() {{
-    return {{
-        pane: 'districtPane',
-        color: '#2563eb',
-        weight: 4,
-        opacity: 1,
-        fillOpacity: 0
-    }};
+    return {{ pane: 'districtPane', color: '#2563eb', weight: 4, opacity: 1, fillOpacity: 0 }};
 }}
 
-function getColor(pm25) {{
-    if (pm25 < 50) return 'green';
-    if (pm25 < 100) return 'orange';
+function getColor(value) {{
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '#9ca3af';
+    value = Number(value);
+    if (value < 50) return 'green';
+    if (value < 100) return 'orange';
     return 'red';
+}}
+
+function formatValue(value) {{
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return 'Нет данных';
+    return Number(value).toFixed(2);
 }}
 
 function clearMarkers() {{
     currentMarkersLayer.clearLayers();
+}}
+
+function getStationsForDistrict(districtRu) {{
+    return (
+        stationGroups[selectedYear] &&
+        stationGroups[selectedYear][currentSeason] &&
+        stationGroups[selectedYear][currentSeason][districtRu]
+    ) || [];
 }}
 
 function showStationDetails(station) {{
@@ -722,6 +824,7 @@ function showStationDetails(station) {{
         <div class="station-item">
             <b>${{station.station_name}}</b><br>
             Район: ${{station.district_ru}}<br>
+            Показатель: ${{pollutantLabels[currentPollutant]}}<br>
             Всего измерений: ${{station.measurements.length}}
         </div>
     `;
@@ -731,7 +834,7 @@ function showStationDetails(station) {{
         html += `
             <div class="station-item">
                 <b>${{m.date}}</b><br>
-                PM2.5: ${{m.pm25 ?? 'Нет данных'}}
+                ${{pollutantLabels[currentPollutant]}}: ${{formatValue(m[currentPollutant])}}
             </div>
         `;
     }}
@@ -746,12 +849,12 @@ function showMarkersForDistrict(districtRu) {{
         return;
     }}
 
-    const stations = (stationGroups[selectedYear] && stationGroups[selectedYear][districtRu]) || [];
+    const stations = getStationsForDistrict(districtRu);
 
     for (let i = 0; i < stations.length; i++) {{
         const s = stations[i];
-        const pm25 = Number(s.pm25_latest) || 0;
-        const color = getColor(pm25);
+        const value = s.latest ? s.latest[currentPollutant] : null;
+        const color = getColor(value);
 
         const marker = L.circleMarker([s.latitude, s.longitude], {{
             pane: 'markerPane',
@@ -765,7 +868,7 @@ function showMarkersForDistrict(districtRu) {{
         }});
 
         marker.bindPopup(
-            `<b>${{s.station_name}}</b><br>Последний PM2.5: ${{pm25}}<br>District: ${{s.district_ru}}<br>Last date: ${{s.latest_date}}<br>Year: ${{s.year}}`
+            `<b>${{s.station_name}}</b><br>${{pollutantLabels[currentPollutant]}}: ${{formatValue(value)}}<br>District: ${{s.district_ru}}<br>Last date: ${{s.latest_date}}<br>Year: ${{s.year}}<br>Season: ${{s.season}}`
         );
 
         marker.on('click', function() {{
@@ -777,20 +880,30 @@ function showMarkersForDistrict(districtRu) {{
 }}
 
 function updatePanel(districtRu) {{
-    const data = (districtInfo[selectedYear] && districtInfo[selectedYear][districtRu]) || null;
+    selectedDistrictRu = districtRu;
+
+    const data = (
+        districtInfo[selectedYear] &&
+        districtInfo[selectedYear][currentSeason] &&
+        districtInfo[selectedYear][currentSeason][districtRu]
+    ) || null;
+
     const panel = document.getElementById('info-card');
     const stationList = document.getElementById('station-list');
 
     if (currentCity !== "almaty") {{
         const cfg = cityConfig[currentCity];
+
         panel.innerHTML = `
             <div class="district-name">${{cfg.name}}</div>
             <div class="hint">
                 Станций пока нет.<br>
                 Сейчас доступен только каркас города и ArcGIS Land Cover слой.<br>
-                Год: ${{selectedYear}}
+                Год: ${{selectedYear}}<br>
+                Сезон: ${{currentSeason}}
             </div>
         `;
+
         stationList.innerHTML = 'Для этого города станции пока не добавлены.';
         return;
     }}
@@ -798,23 +911,27 @@ function updatePanel(districtRu) {{
     if (!data) {{
         panel.innerHTML = `
             <div class="district-name">Нет данных</div>
-            <div class="hint">Для этого района нет данных за ${{selectedYear}}</div>
+            <div class="hint">Для этого района нет данных за ${{selectedYear}}, ${{currentSeason}}</div>
             <button class="top-btn" onclick="resetView()">Сбросить выбор</button>
         `;
         stationList.innerHTML = 'Нет станций';
         return;
     }}
 
+    const avgValue = data.pollution ? data.pollution[currentPollutant] : null;
+
     panel.innerHTML = `
         <div class="district-name">${{data.district_ru}}</div>
         <div class="metric"><b>Город:</b> Алматы, Казахстан</div>
         <div class="metric"><b>Год:</b> ${{selectedYear}}</div>
-        <div class="metric"><b>Средний PM2.5:</b> ${{data.pollution ?? 'Нет данных'}}</div>
+        <div class="metric"><b>Сезон:</b> ${{currentSeason}}</div>
+        <div class="metric"><b>Показатель:</b> ${{pollutantLabels[currentPollutant]}}</div>
+        <div class="metric"><b>Среднее значение:</b> ${{formatValue(avgValue)}}</div>
         <div class="metric"><b>Количество измерений:</b> ${{data.count}}</div>
         <button class="top-btn" onclick="resetView()">Сбросить выбор</button>
     `;
 
-    const stations = (stationGroups[selectedYear] && stationGroups[selectedYear][districtRu]) || [];
+    const stations = getStationsForDistrict(districtRu);
 
     if (stations.length === 0) {{
         stationList.innerHTML = 'Нет станций';
@@ -822,7 +939,7 @@ function updatePanel(districtRu) {{
         stationList.innerHTML = stations.map(s => `
             <div class="station-item">
                 <b>${{s.station_name}}</b><br>
-                Последний PM2.5: ${{s.pm25_latest}}<br>
+                ${{pollutantLabels[currentPollutant]}}: ${{formatValue(s.latest ? s.latest[currentPollutant] : null)}}<br>
                 Последняя дата: ${{s.latest_date}}
             </div>
         `).join('');
@@ -837,22 +954,17 @@ function resetDistrictStyles() {{
 }}
 
 function setAlmatyDistrictsVisible(visible) {{
-    if (!geojsonLayer) {{
-        return;
-    }}
+    if (!geojsonLayer) return;
 
     if (visible) {{
-        if (!map.hasLayer(geojsonLayer)) {{
-            geojsonLayer.addTo(map);
-        }}
+        if (!map.hasLayer(geojsonLayer)) geojsonLayer.addTo(map);
     }} else {{
-        if (map.hasLayer(geojsonLayer)) {{
-            map.removeLayer(geojsonLayer);
-        }}
+        if (map.hasLayer(geojsonLayer)) map.removeLayer(geojsonLayer);
     }}
 }}
 
 function resetView() {{
+    selectedDistrictRu = null;
     resetDistrictStyles();
     clearMarkers();
 
@@ -860,12 +972,14 @@ function resetView() {{
 
     if (currentCity === "almaty") {{
         setAlmatyDistrictsVisible(true);
-        pm25LegendCard.style.display = "block";
+        pollutionLegendCard.style.display = "block";
 
         document.getElementById('info-card').innerHTML = `
             <div class="district-name">Алматы, Казахстан</div>
             <div class="hint">
-                Выбран год: ${{selectedYear || 'нет'}}<br>
+                Год: ${{selectedYear || 'нет'}}<br>
+                Сезон: ${{currentSeason || 'нет'}}<br>
+                Показатель: ${{pollutantLabels[currentPollutant]}}<br>
                 Нажми на район на карте.<br>
                 Потом нажми на конкретную станцию.
             </div>
@@ -875,14 +989,15 @@ function resetView() {{
         document.getElementById('station-list').innerHTML = 'Выбери район, потом станцию';
     }} else {{
         setAlmatyDistrictsVisible(false);
-        pm25LegendCard.style.display = "none";
+        pollutionLegendCard.style.display = "none";
 
         document.getElementById('info-card').innerHTML = `
             <div class="district-name">${{cfg.name}}</div>
             <div class="hint">
                 Станций пока нет.<br>
                 Сейчас доступен только каркас города и ArcGIS Land Cover слой.<br>
-                Год: ${{selectedYear}}.
+                Год: ${{selectedYear}}<br>
+                Сезон: ${{currentSeason}}
             </div>
         `;
 
@@ -916,29 +1031,17 @@ geojsonLayer = L.geoJSON(geojsonData, {{
         }});
 
         layer.on('mouseover', function() {{
-            if (currentCity !== "almaty") {{
-                return;
-            }}
-
-            if (selectedLayer !== layer) {{
-                layer.setStyle(getHoverStyle());
-            }}
+            if (currentCity !== "almaty") return;
+            if (selectedLayer !== layer) layer.setStyle(getHoverStyle());
         }});
 
         layer.on('mouseout', function() {{
-            if (currentCity !== "almaty") {{
-                return;
-            }}
-
-            if (selectedLayer !== layer) {{
-                layer.setStyle(getDefaultStyle());
-            }}
+            if (currentCity !== "almaty") return;
+            if (selectedLayer !== layer) layer.setStyle(getDefaultStyle());
         }});
 
         layer.on('click', function() {{
-            if (currentCity !== "almaty") {{
-                return;
-            }}
+            if (currentCity !== "almaty") return;
 
             resetDistrictStyles();
             selectedLayer = layer;
@@ -948,9 +1051,7 @@ geojsonLayer = L.geoJSON(geojsonData, {{
             showMarkersForDistrict(districtRu);
 
             currentMarkersLayer.eachLayer(function(marker) {{
-                if (marker.bringToFront) {{
-                    marker.bringToFront();
-                }}
+                if (marker.bringToFront) marker.bringToFront();
             }});
 
             if (typeof layer.getBounds === 'function') {{
@@ -966,8 +1067,6 @@ resetView();
 </body>
 </html>
 """
-
-output_path = os.path.join(BASE_DIR, "final_map.html")
 
 if os.path.exists(output_path):
     try:
